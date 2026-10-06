@@ -1,0 +1,10 @@
+{
+    "display_name": "Tool Call Image",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "user",
+    "version": "1.0.0",
+    "homePage": ""
+}
