@@ -76,8 +76,8 @@ function appendText(content, text) {
 }
 
 /**
- * Replaces finished image-generation tool exchanges in history, 
- * but keeps the single most recent completed tool response intact.
+ * Keeps ONLY the absolute newest image tool response in the entire history.
+ * All older tool responses are stripped and converted into text notes.
  */
 function stripImageToolExchanges(messages) {
     const callById = new Map();
@@ -99,51 +99,52 @@ function stripImageToolExchanges(messages) {
         return null;
     };
 
-    // Trailing run of tool messages = in-flight results.
-    let tailStart = messages.length;
-    while (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
-
-    // Collect all completed historical tool responses
-    const completedToolIndices = [];
+    // Find ALL image tool messages across the entire history
+    const imageToolItems = [];
     messages.forEach((msg, i) => {
         const kind = kindOf(msg);
-        if (!kind) return;
-
-        if (i >= tailStart) {
-            // In flight: mask a result, but leave an error as is.
-            if (kind === 'sent') {
-                msg.content = PLACEHOLDER;
-            }
-        } else {
-            completedToolIndices.push({ index: i, msg, kind, tool_call_id: msg.tool_call_id });
+        if (kind) {
+            imageToolItems.push({ index: i, msg, kind, tool_call_id: msg.tool_call_id });
         }
     });
 
-    const dropIdx = new Set();
+    if (imageToolItems.length === 0) return { messages, removed: 0, replaced: 0 };
+
+    const dropIndices = new Set();
     const removedIds = new Set();
     const failedIds = new Set();
 
-    // If there are multiple completed tool responses, keep the *very last* one, 
-    // and drop/convert all older ones into text notes.
-    if (completedToolIndices.length > 1) {
-        for (let j = 0; j < completedToolIndices.length - 1; j++) {
-            const item = completedToolIndices[j];
-            dropIdx.add(item.index);
-            if (item.tool_call_id) {
-                removedIds.add(item.tool_call_id);
-                if (item.kind === 'failed') failedIds.add(item.tool_call_id);
-            }
+    // Keep the absolute LAST item; drop/convert all previous ones into notes
+    const lastItem = imageToolItems[imageToolItems.length - 1];
+    for (let j = 0; j < imageToolItems.length - 1; j++) {
+        const item = imageToolItems[j];
+        dropIndices.add(item.index);
+        if (item.tool_call_id) {
+            removedIds.add(item.tool_call_id);
+            if (item.kind === 'failed') failedIds.add(item.tool_call_id);
         }
     }
 
-    if (dropIdx.size === 0) return { messages, removed: 0, replaced: 0 };
+    // Check if the last item is in-flight (at the tail)
+    let tailStart = messages.length;
+    while (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
+
+    let replaced = 0;
+    if (lastItem.index >= tailStart) {
+        if (lastItem.kind === 'sent') {
+            lastItem.msg.content = PLACEHOLDER;
+            replaced++;
+        }
+    }
+
+    if (dropIndices.size === 0 && replaced === 0) return { messages, removed: 0, replaced: 0 };
 
     const charName = getCharName();
     const result = [];
     const pureNotes = new Set();
 
     messages.forEach((msg, i) => {
-        if (dropIdx.has(i)) return;
+        if (dropIndices.has(i)) return;
 
         if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && removedIds.size > 0) {
             const removedCalls = msg.tool_calls.filter(tc => removedIds.has(tc?.id));
@@ -178,7 +179,7 @@ function stripImageToolExchanges(messages) {
         if (drop.size > 0) final = result.filter(m => !drop.has(m));
     }
 
-    return { messages: final, removed: dropIdx.size, replaced: 0 };
+    return { messages: final, removed: dropIndices.size, replaced };
 }
 
 (function attachFetchInterceptor() {
@@ -199,7 +200,7 @@ function stripImageToolExchanges(messages) {
                     if (removed > 0 || replaced > 0) {
                         body.messages = messages;
                         init = { ...init, body: JSON.stringify(body) };
-                        console.log(`${TAG} converted ${removed} older image tool exchange(s) to text notes, keeping 1 recent tool response.`);
+                        console.log(`${TAG} converted ${removed} older image tool exchange(s) to text notes, keeping only the latest one.`);
                     }
                 }
             }
