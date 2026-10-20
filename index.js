@@ -12,7 +12,7 @@ const NOTE_TEMPLATE = '[{{char}} sent a picture that contains: {{prompt}}]';
 
 // Keep only the newest N picture notes in the prompt; older note-only messages are dropped.
 // Set to 0 to keep all of them.
-const MAX_NOTES_IN_HISTORY = 3;
+const MAX_NOTES_IN_HISTORY = 1;
 
 // Log the role sequence of every chat request to the browser console (for debugging).
 const DEBUG = false;
@@ -31,6 +31,11 @@ function isEmptyResult(msg) {
     if (msg.content === undefined || msg.content === null) return true;
     if (typeof msg.content !== 'string') return false;
     return ['', 'undefined', 'null'].includes(msg.content.trim());
+}
+
+// Failed call of the image tool, e.g. 'Error: No tool with the name "GenerateImage" has been registered.'
+function isFailedResult(msg) {
+    return isToolRole(msg) && typeof msg.content === 'string' && /^error\b/i.test(msg.content.trim());
 }
 
 function getCharName() {
@@ -92,13 +97,16 @@ function stripImageToolExchanges(messages) {
         }
     }
 
-    const isUnwanted = (msg) => {
-        if (isImagePathResult(msg)) return true;
-        if (isEmptyResult(msg)) {
-            const name = callById.get(msg.tool_call_id)?.function?.name || msg.name || '';
-            return IMAGE_TOOL_NAME_RE.test(name);
-        }
-        return false;
+    // 'sent'   = picture was sent (image path, or empty/'undefined' result of the image tool)
+    // 'failed' = the image tool call errored (nothing was sent)
+    const kindOf = (msg) => {
+        if (!isToolRole(msg)) return null;
+        if (isImagePathResult(msg)) return 'sent';
+        const name = callById.get(msg.tool_call_id)?.function?.name || msg.name || '';
+        if (!IMAGE_TOOL_NAME_RE.test(name)) return null;
+        if (isEmptyResult(msg)) return 'sent';
+        if (isFailedResult(msg)) return 'failed';
+        return null;
     };
 
     // Trailing run of tool messages = in-flight results.
@@ -109,17 +117,26 @@ function stripImageToolExchanges(messages) {
     const dropIdx = new Set();
     let replaced = 0;
 
+    const failedIds = new Set();
+
     messages.forEach((msg, i) => {
-        if (!isUnwanted(msg)) return;
+        const kind = kindOf(msg);
+        if (!kind) return;
 
         if (i >= tailStart) {
-            msg.content = PLACEHOLDER;
-            replaced++;
+            // In flight: mask a result, but leave an error as is so the model sees it.
+            if (kind === 'sent') {
+                msg.content = PLACEHOLDER;
+                replaced++;
+            }
             return;
         }
 
         dropIdx.add(i);
-        if (msg.tool_call_id) removedIds.add(msg.tool_call_id);
+        if (msg.tool_call_id) {
+            removedIds.add(msg.tool_call_id);
+            if (kind === 'failed') failedIds.add(msg.tool_call_id);
+        }
     });
 
     if (dropIdx.size === 0 && replaced === 0) return { messages, removed: 0, replaced: 0 };
@@ -135,14 +152,22 @@ function stripImageToolExchanges(messages) {
             const removedCalls = msg.tool_calls.filter(tc => removedIds.has(tc?.id));
             if (removedCalls.length > 0) {
                 const kept = msg.tool_calls.filter(tc => !removedIds.has(tc?.id));
-                const notes = removedCalls.map(tc => buildNote(extractPrompt(tc), charName)).join('\n');
+                // Failed calls get no note: nothing was sent.
+                const notes = removedCalls
+                    .filter(tc => !failedIds.has(tc.id))
+                    .map(tc => buildNote(extractPrompt(tc), charName))
+                    .join('\n');
 
                 const hadText = hasText(msg.content);
                 if (kept.length > 0) msg.tool_calls = kept;
                 else delete msg.tool_calls;
 
-                msg.content = appendText(msg.content, notes);
-                if (!hadText && kept.length === 0) pureNotes.add(msg);
+                if (notes) {
+                    msg.content = appendText(msg.content, notes);
+                    if (!hadText && kept.length === 0) pureNotes.add(msg);
+                } else if (!hadText && kept.length === 0) {
+                    return; // only a failed call was in this message: drop it
+                }
             }
         }
 
