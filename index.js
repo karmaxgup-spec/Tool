@@ -1,17 +1,14 @@
-const TAG = '[st-hide-tool-images]';
+Const TAG = '[st-hide-tool-images]';
 const PLACEHOLDER = 'Image generated and already shown to the user.';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 
 // Name of the image-generation function (matched against tool_calls[].function.name).
-// Edit this if your tool is called something else.
 const IMAGE_TOOL_NAME_RE = /generate.?image/i;
 
 // Text that replaces a removed image tool exchange in the prompt.
-// {{char}} = character name, {{prompt}} = the image prompt the model used.
 const NOTE_TEMPLATE = '[{{char}} sent a picture that contains: {{prompt}}]';
 
 // Keep only the newest N picture notes in the prompt; older note-only messages are dropped.
-// Set to 0 to keep all of them.
 const MAX_NOTES_IN_HISTORY = 1;
 
 // Log the role sequence of every chat request to the browser console (for debugging).
@@ -21,198 +18,197 @@ const isToolRole = (msg) => msg && (msg.role === 'tool' || msg.role === 'functio
 
 // Bare image path, e.g. /user/images/Priya/Priya_2026-10-19@20h45m22s972ms.webp
 function isImagePathResult(msg) {
-    if (!isToolRole(msg) || typeof msg.content !== 'string') return false;
-    return /^\/user\/images\/.+\.(webp|png|jpe?g)$/i.test(msg.content.trim());
+    If (!isToolRole(msg) || typeof msg.content !== 'string') return false;
+    Return /^\/user\/images\/.+\.(webp|png|jpe?g)$/i.test(msg.content.trim());
 }
 
 // Empty / failed result of the image tool, e.g. content: 'undefined'
 function isEmptyResult(msg) {
-    if (!isToolRole(msg)) return false;
-    if (msg.content === undefined || msg.content === null) return true;
-    if (typeof msg.content !== 'string') return false;
-    return ['', 'undefined', 'null'].includes(msg.content.trim());
+    If (!isToolRole(msg)) return false;
+    If (msg.content === undefined || msg.content === null) return true;
+    If (typeof msg.content !== 'string') return false;
+    Return ['', 'undefined', 'null'].includes(msg.content.trim());
 }
 
-// Failed call of the image tool, e.g. 'Error: No tool with the name "GenerateImage" has been registered.'
+// Failed call of the image tool
 function isFailedResult(msg) {
-    return isToolRole(msg) && typeof msg.content === 'string' && /^error\b/i.test(msg.content.trim());
+    Return isToolRole(msg) && typeof msg.content === 'string' && /^error\b/i.test(msg.content.trim());
 }
 
 function getCharName() {
-    try {
-        return SillyTavern.getContext().name2 || 'Character';
+    Try {
+        Return SillyTavern.getContext().name2 || 'Character';
     } catch {
-        return 'Character';
+        Return 'Character';
     }
 }
 
 // Pull the image prompt out of a tool call's arguments.
 function extractPrompt(tc) {
-    let args = tc?.function?.arguments;
-    if (typeof args === 'string') {
-        try { args = JSON.parse(args); } catch { return args.trim(); }
+    Let args = tc?.function?.arguments;
+    If (typeof args === 'string') {
+        Try { args = JSON.parse(args); } catch { return args.trim(); }
     }
-    if (args && typeof args === 'object') {
-        const v = args.prompt ?? args.description ?? args.text ??
+    If (args && typeof args === 'object') {
+        Const v = args.prompt ?? args.description ?? args.text ??
             Object.values(args).find(x => typeof x === 'string');
-        return typeof v === 'string' ? v.trim() : '';
+        Return typeof v === 'string' ? v.trim() : '';
     }
-    return '';
+    Return '';
 }
 
 function buildNote(prompt, charName) {
-    return NOTE_TEMPLATE
+    Return NOTE_TEMPLATE
         .replaceAll('{{char}}', charName)
         .replaceAll('{{prompt}}', prompt || 'an image');
 }
 
 function hasText(content) {
-    if (typeof content === 'string') return content.trim().length > 0;
-    if (Array.isArray(content)) return content.length > 0;
-    return false;
+    If (typeof content === 'string') return content.trim().length > 0;
+    If (Array.isArray(content)) return content.length > 0;
+    Return false;
 }
 
 function appendText(content, text) {
-    if (Array.isArray(content)) return [...content, { type: 'text', text }];
-    if (typeof content === 'string' && content.trim()) return `${content}\n${text}`;
-    return text;
+    If (Array.isArray(content)) return [...content, { type: 'text', text }];
+    If (typeof content === 'string' && content.trim()) return `${content}\n${text}`;
+    Return text;
 }
 
 /**
- * Replaces finished image-generation tool exchanges in history:
- *  - the tool response message is removed
- *  - the matching tool_calls entry is removed (by id)
- *  - the assistant message gets "[{{char}} sent a picture that contains: {{prompt}}]" instead,
- *    so the model still knows what was sent
- * Other function calls are never touched. Tool results at the very end of the
- * prompt (call currently in flight) are kept, with the content swapped for a placeholder.
+ * Replaces finished image-generation tool exchanges in history, 
+ * but keeps the single most recent completed tool response intact.
  */
 function stripImageToolExchanges(messages) {
-    const callById = new Map();
-    for (const msg of messages) {
-        if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
-            for (const tc of msg.tool_calls) {
-                if (tc?.id) callById.set(tc.id, tc);
+    Const callById = new Map();
+    For (const msg of messages) {
+        If (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+            For (const tc of msg.tool_calls) {
+                If (tc?.id) callById.set(tc.id, tc);
             }
         }
     }
 
-    // 'sent'   = picture was sent (image path, or empty/'undefined' result of the image tool)
-    // 'failed' = the image tool call errored (nothing was sent)
-    const kindOf = (msg) => {
-        if (!isToolRole(msg)) return null;
-        if (isImagePathResult(msg)) return 'sent';
-        const name = callById.get(msg.tool_call_id)?.function?.name || msg.name || '';
-        if (!IMAGE_TOOL_NAME_RE.test(name)) return null;
-        if (isEmptyResult(msg)) return 'sent';
-        if (isFailedResult(msg)) return 'failed';
-        return null;
+    Const kindOf = (msg) => {
+        If (!isToolRole(msg)) return null;
+        If (isImagePathResult(msg)) return 'sent';
+        Const name = callById.get(msg.tool_call_id)?.function?.name || msg.name || '';
+        If (!IMAGE_TOOL_NAME_RE.test(name)) return null;
+        If (isEmptyResult(msg)) return 'sent';
+        If (isFailedResult(msg)) return 'failed';
+        Return null;
     };
 
     // Trailing run of tool messages = in-flight results.
-    let tailStart = messages.length;
-    while (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
+    Let tailStart = messages.length;
+    While (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
 
-    const removedIds = new Set();
-    const dropIdx = new Set();
-    let replaced = 0;
+    // Collect all completed historical tool responses
+    Const completedToolIndices = [];
+    Messages.forEach((msg, i) => {
+        Const kind = kindOf(msg);
+        If (!kind) return;
 
-    const failedIds = new Set();
-
-    messages.forEach((msg, i) => {
-        const kind = kindOf(msg);
-        if (!kind) return;
-
-        if (i >= tailStart) {
-            // In flight: mask a result, but leave an error as is so the model sees it.
-            if (kind === 'sent') {
-                msg.content = PLACEHOLDER;
-                replaced++;
+        If (i >= tailStart) {
+            // In flight: mask a result, but leave an error as is.
+            If (kind === 'sent') {
+                Msg.content = PLACEHOLDER;
             }
-            return;
-        }
-
-        dropIdx.add(i);
-        if (msg.tool_call_id) {
-            removedIds.add(msg.tool_call_id);
-            if (kind === 'failed') failedIds.add(msg.tool_call_id);
+        } else {
+            CompletedToolIndices.push({ index: i, msg, kind, tool_call_id: msg.tool_call_id });
         }
     });
 
-    if (dropIdx.size === 0 && replaced === 0) return { messages, removed: 0, replaced: 0 };
+    Const dropIdx = new Set();
+    Const removedIds = new Set();
+    Const failedIds = new Set();
 
-    const charName = getCharName();
-    const result = [];
-    const pureNotes = new Set(); // assistant messages that now contain only a picture note
+    // If there are completed tool responses, keep the *very last* one, 
+    // and drop/convert all older ones into text notes.
+    If (completedToolIndices.length > 1) {
+        For (let j = 0; j < completedToolIndices.length - 1; j++) {
+            Const item = completedToolIndices[j];
+            DropIdx.add(item.index);
+            If (item.tool_call_id) {
+                RemovedIds.add(item.tool_call_id);
+                If (item.kind === 'failed') failedIds.add(item.tool_call_id);
+            }
+        }
+    }
 
-    messages.forEach((msg, i) => {
-        if (dropIdx.has(i)) return;
+    If (dropIdx.size === 0) return { messages, removed: 0, replaced: 0 };
 
-        if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && removedIds.size > 0) {
-            const removedCalls = msg.tool_calls.filter(tc => removedIds.has(tc?.id));
-            if (removedCalls.length > 0) {
-                const kept = msg.tool_calls.filter(tc => !removedIds.has(tc?.id));
-                // Failed calls get no note: nothing was sent.
-                const notes = removedCalls
+    Const charName = getCharName();
+    Const result = [];
+    Const pureNotes = new Set();
+
+    Messages.forEach((msg, i) => {
+        If (dropIdx.has(i)) return;
+
+        If (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && removedIds.size > 0) {
+            Const removedCalls = msg.tool_calls.filter(tc => removedIds.has(tc?.id));
+            If (removedCalls.length > 0) {
+                Const kept = msg.tool_calls.filter(tc => !removedIds.has(tc?.id));
+                Const notes = removedCalls
                     .filter(tc => !failedIds.has(tc.id))
                     .map(tc => buildNote(extractPrompt(tc), charName))
                     .join('\n');
 
-                const hadText = hasText(msg.content);
-                if (kept.length > 0) msg.tool_calls = kept;
-                else delete msg.tool_calls;
+                Const hadText = hasText(msg.content);
+                If (kept.length > 0) msg.tool_calls = kept;
+                Else delete msg.tool_calls;
 
-                if (notes) {
-                    msg.content = appendText(msg.content, notes);
-                    if (!hadText && kept.length === 0) pureNotes.add(msg);
+                If (notes) {
+                    Msg.content = appendText(msg.content, notes);
+                    If (!hadText && kept.length === 0) pureNotes.add(msg);
                 } else if (!hadText && kept.length === 0) {
-                    return; // only a failed call was in this message: drop it
+                    Return;
                 }
             }
         }
 
-        result.push(msg);
+        Result.push(msg);
     });
 
     // Drop the oldest note-only messages beyond the cap.
-    let final = result;
-    if (MAX_NOTES_IN_HISTORY > 0) {
-        const pure = result.filter(m => pureNotes.has(m));
-        const drop = new Set(pure.slice(0, Math.max(0, pure.length - MAX_NOTES_IN_HISTORY)));
-        if (drop.size > 0) final = result.filter(m => !drop.has(m));
+    Let final = result;
+    If (MAX_NOTES_IN_HISTORY > 0) {
+        Const pure = result.filter(m => pureNotes.has(m));
+        Const drop = new Set(pure.slice(0, Math.max(0, pure.length - MAX_NOTES_IN_HISTORY)));
+        If (drop.size > 0) final = result.filter(m => !drop.has(m));
     }
 
-    return { messages: final, removed: dropIdx.size, replaced };
+    Return { messages: final, removed: dropIdx.size, replaced: 0 };
 }
 
 (function attachFetchInterceptor() {
-    const originalFetch = window.fetch;
+    Const originalFetch = window.fetch;
 
-    window.fetch = async function (resource, init) {
-        try {
-            const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+    Window.fetch = async function (resource, init) {
+        Try {
+            Const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
 
-            if (url.includes(GENERATE_URL) && init && typeof init.body === 'string') {
-                const body = JSON.parse(init.body);
+            If (url.includes(GENERATE_URL) && init && typeof init.body === 'string') {
+                Const body = JSON.parse(init.body);
 
-                if (body && Array.isArray(body.messages)) {
-                    if (DEBUG) console.log(TAG, 'roles in:', body.messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
-                    const { messages, removed, replaced } = stripImageToolExchanges(body.messages);
-                    if (DEBUG) console.log(TAG, 'roles out:', messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
+                If (body && Array.isArray(body.messages)) {
+                    If (DEBUG) console.log(TAG, 'roles in:', body.messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
+                    Const { messages, removed, replaced } = stripImageToolExchanges(body.messages);
+                    If (DEBUG) console.log(TAG, 'roles out:', messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
 
-                    if (removed > 0 || replaced > 0) {
-                        body.messages = messages;
-                        init = { ...init, body: JSON.stringify(body) };
-                        console.log(`${TAG} replaced ${removed} image tool exchange(s) with a text note, masked ${replaced} in-flight.`);
+                    If (removed > 0 || replaced > 0) {
+                        Body.messages = messages;
+                        Init = { ...init, body: JSON.stringify(body) };
+                        Console.log(`${TAG} converted ${removed} older image tool exchange(s) to text notes, keeping 1 recent tool response.`);
                     }
                 }
             }
         } catch (err) {
-            console.error(TAG, 'Error in fetch interceptor:', err);
+            Console.error(TAG, 'Error in fetch interceptor:', err);
         }
 
-        return originalFetch.call(this, resource, init);
+        Return originalFetch.call(this, resource, init);
     };
 })();
 
-console.log(`${TAG} Extension loaded and fetch interceptor active.`);
+Console.log(`${TAG} Extension loaded and fetch interceptor active.`);
