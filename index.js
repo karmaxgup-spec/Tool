@@ -10,6 +10,13 @@ const IMAGE_TOOL_NAME_RE = /generate.?image/i;
 // {{char}} = character name, {{prompt}} = the image prompt the model used.
 const NOTE_TEMPLATE = '[{{char}} sent a picture that contains: {{prompt}}]';
 
+// Keep only the newest N picture notes in the prompt; older note-only messages are dropped.
+// Set to 0 to keep all of them.
+const MAX_NOTES_IN_HISTORY = 3;
+
+// Log the role sequence of every chat request to the browser console (for debugging).
+const DEBUG = false;
+
 const isToolRole = (msg) => msg && (msg.role === 'tool' || msg.role === 'function');
 
 // Bare image path, e.g. /user/images/Priya/Priya_2026-10-19@20h45m22s972ms.webp
@@ -52,6 +59,12 @@ function buildNote(prompt, charName) {
     return NOTE_TEMPLATE
         .replaceAll('{{char}}', charName)
         .replaceAll('{{prompt}}', prompt || 'an image');
+}
+
+function hasText(content) {
+    if (typeof content === 'string') return content.trim().length > 0;
+    if (Array.isArray(content)) return content.length > 0;
+    return false;
 }
 
 function appendText(content, text) {
@@ -113,6 +126,7 @@ function stripImageToolExchanges(messages) {
 
     const charName = getCharName();
     const result = [];
+    const pureNotes = new Set(); // assistant messages that now contain only a picture note
 
     messages.forEach((msg, i) => {
         if (dropIdx.has(i)) return;
@@ -123,17 +137,27 @@ function stripImageToolExchanges(messages) {
                 const kept = msg.tool_calls.filter(tc => !removedIds.has(tc?.id));
                 const notes = removedCalls.map(tc => buildNote(extractPrompt(tc), charName)).join('\n');
 
+                const hadText = hasText(msg.content);
                 if (kept.length > 0) msg.tool_calls = kept;
                 else delete msg.tool_calls;
 
                 msg.content = appendText(msg.content, notes);
+                if (!hadText && kept.length === 0) pureNotes.add(msg);
             }
         }
 
         result.push(msg);
     });
 
-    return { messages: result, removed: dropIdx.size, replaced };
+    // Drop the oldest note-only messages beyond the cap.
+    let final = result;
+    if (MAX_NOTES_IN_HISTORY > 0) {
+        const pure = result.filter(m => pureNotes.has(m));
+        const drop = new Set(pure.slice(0, Math.max(0, pure.length - MAX_NOTES_IN_HISTORY)));
+        if (drop.size > 0) final = result.filter(m => !drop.has(m));
+    }
+
+    return { messages: final, removed: dropIdx.size, replaced };
 }
 
 (function attachFetchInterceptor() {
@@ -147,7 +171,9 @@ function stripImageToolExchanges(messages) {
                 const body = JSON.parse(init.body);
 
                 if (body && Array.isArray(body.messages)) {
+                    if (DEBUG) console.log(TAG, 'roles in:', body.messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
                     const { messages, removed, replaced } = stripImageToolExchanges(body.messages);
+                    if (DEBUG) console.log(TAG, 'roles out:', messages.map(m => m.role + (m.tool_calls ? '(tc)' : '')).join(' '));
 
                     if (removed > 0 || replaced > 0) {
                         body.messages = messages;
