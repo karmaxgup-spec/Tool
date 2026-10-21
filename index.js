@@ -3,12 +3,14 @@ const PLACEHOLDER = 'Image generated and already shown to the user.';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 
 // Name of the image-generation function (matched against tool_calls[].function.name).
+// Edit this if your tool is called something else.
 const IMAGE_TOOL_NAME_RE = /generate.?image/i;
 
-// Text that replaces a removed image tool exchange in the prompt.
+// Text that replaces an older image tool exchange in the prompt.
+// {{char}} = character name, {{prompt}} = the image prompt the model used.
 const NOTE_TEMPLATE = '[{{char}} sent a picture that contains: {{prompt}}]';
 
-// Keep only the newest N picture notes in the prompt; older note-only messages are dropped.
+// Keep only the newest N note-only messages in the prompt. 0 = keep all.
 const MAX_NOTES_IN_HISTORY = 1;
 
 // Log the role sequence of every chat request to the browser console (for debugging).
@@ -30,9 +32,15 @@ function isEmptyResult(msg) {
     return ['', 'undefined', 'null'].includes(msg.content.trim());
 }
 
-// Failed call of the image tool
+// Failed call of the image tool, e.g. 'Error: No tool with the name "GenerateImage" has been registered.'
 function isFailedResult(msg) {
     return isToolRole(msg) && typeof msg.content === 'string' && /^error\b/i.test(msg.content.trim());
+}
+
+function hasText(content) {
+    if (typeof content === 'string') return content.trim().length > 0;
+    if (Array.isArray(content)) return content.length > 0;
+    return false;
 }
 
 function getCharName() {
@@ -63,12 +71,6 @@ function buildNote(prompt, charName) {
         .replaceAll('{{prompt}}', prompt || 'an image');
 }
 
-function hasText(content) {
-    if (typeof content === 'string') return content.trim().length > 0;
-    if (Array.isArray(content)) return content.length > 0;
-    return false;
-}
-
 function appendText(content, text) {
     if (Array.isArray(content)) return [...content, { type: 'text', text }];
     if (typeof content === 'string' && content.trim()) return `${content}\n${text}`;
@@ -76,8 +78,14 @@ function appendText(content, text) {
 }
 
 /**
- * Keeps ONLY the absolute newest image tool response in the entire history.
- * All older tool responses are stripped and converted into text notes.
+ * Trims image-generation tool exchanges from the prompt:
+ *  - the newest successful image call stays as a real tool call (so the model keeps
+ *    the tool-call format), with its result masked to a placeholder
+ *  - older successful image calls are removed (tool result + tool_calls entry) and
+ *    replaced by a text note "[{{char}} sent a picture that contains: {{prompt}}]"
+ *  - failed image calls are removed with no note
+ *  - other function calls are never touched
+ *  - a tool result at the end of the prompt (call in flight) is masked, not removed
  */
 function stripImageToolExchanges(messages) {
     const callById = new Map();
@@ -89,6 +97,8 @@ function stripImageToolExchanges(messages) {
         }
     }
 
+    // 'sent'   = picture was sent (image path, or empty/'undefined' result of the image tool)
+    // 'failed' = the image tool call errored (nothing was sent)
     const kindOf = (msg) => {
         if (!isToolRole(msg)) return null;
         if (isImagePathResult(msg)) return 'sent';
@@ -99,57 +109,55 @@ function stripImageToolExchanges(messages) {
         return null;
     };
 
-    // Find ALL image tool messages across the entire history
-    const imageToolItems = [];
-    messages.forEach((msg, i) => {
-        const kind = kindOf(msg);
-        if (kind) {
-            imageToolItems.push({ index: i, msg, kind, tool_call_id: msg.tool_call_id });
-        }
-    });
-
-    if (imageToolItems.length === 0) return { messages, removed: 0, replaced: 0 };
-
-    const dropIndices = new Set();
-    const removedIds = new Set();
-    const failedIds = new Set();
-
-    // Keep the absolute LAST item; drop/convert all previous ones into notes
-    const lastItem = imageToolItems[imageToolItems.length - 1];
-    for (let j = 0; j < imageToolItems.length - 1; j++) {
-        const item = imageToolItems[j];
-        dropIndices.add(item.index);
-        if (item.tool_call_id) {
-            removedIds.add(item.tool_call_id);
-            if (item.kind === 'failed') failedIds.add(item.tool_call_id);
-        }
-    }
-
-    // Check if the last item is in-flight (at the tail)
+    // Trailing run of tool messages = in-flight results.
     let tailStart = messages.length;
     while (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
 
-    let replaced = 0;
-    if (lastItem.index >= tailStart) {
-        if (lastItem.kind === 'sent') {
-            lastItem.msg.content = PLACEHOLDER;
-            replaced++;
-        }
-    }
+    // Newest successful image call is kept as a real example of tool calling.
+    let keepIdx = -1;
+    messages.forEach((msg, i) => {
+        if (kindOf(msg) === 'sent') keepIdx = i;
+    });
 
-    if (dropIndices.size === 0 && replaced === 0) return { messages, removed: 0, replaced: 0 };
+    const removedIds = new Set();
+    const failedIds = new Set();
+    const dropIdx = new Set();
+    let replaced = 0;
+
+    messages.forEach((msg, i) => {
+        const kind = kindOf(msg);
+        if (!kind) return;
+
+        if (i >= tailStart || i === keepIdx) {
+            if (kind === 'sent') {
+                msg.content = PLACEHOLDER;
+                replaced++;
+            }
+            return;
+        }
+
+        dropIdx.add(i);
+        if (msg.tool_call_id) {
+            removedIds.add(msg.tool_call_id);
+            if (kind === 'failed') failedIds.add(msg.tool_call_id);
+        }
+    });
+
+    if (dropIdx.size === 0 && replaced === 0) return { messages, removed: 0, replaced: 0 };
 
     const charName = getCharName();
     const result = [];
-    const pureNotes = new Set();
+    const pureNotes = new Set(); // assistant messages that now contain only a picture note
 
     messages.forEach((msg, i) => {
-        if (dropIndices.has(i)) return;
+        if (dropIdx.has(i)) return;
 
         if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && removedIds.size > 0) {
             const removedCalls = msg.tool_calls.filter(tc => removedIds.has(tc?.id));
             if (removedCalls.length > 0) {
                 const kept = msg.tool_calls.filter(tc => !removedIds.has(tc?.id));
+
+                // Failed calls get no note: nothing was sent.
                 const notes = removedCalls
                     .filter(tc => !failedIds.has(tc.id))
                     .map(tc => buildNote(extractPrompt(tc), charName))
@@ -163,7 +171,7 @@ function stripImageToolExchanges(messages) {
                     msg.content = appendText(msg.content, notes);
                     if (!hadText && kept.length === 0) pureNotes.add(msg);
                 } else if (!hadText && kept.length === 0) {
-                    return;
+                    return; // only a failed call was in this message: drop it
                 }
             }
         }
@@ -171,7 +179,7 @@ function stripImageToolExchanges(messages) {
         result.push(msg);
     });
 
-    // Drop the oldest note-only messages beyond the cap.
+    // Keep only the newest note-only messages.
     let final = result;
     if (MAX_NOTES_IN_HISTORY > 0) {
         const pure = result.filter(m => pureNotes.has(m));
@@ -179,7 +187,7 @@ function stripImageToolExchanges(messages) {
         if (drop.size > 0) final = result.filter(m => !drop.has(m));
     }
 
-    return { messages: final, removed: dropIndices.size, replaced };
+    return { messages: final, removed: dropIdx.size, replaced };
 }
 
 (function attachFetchInterceptor() {
@@ -200,7 +208,7 @@ function stripImageToolExchanges(messages) {
                     if (removed > 0 || replaced > 0) {
                         body.messages = messages;
                         init = { ...init, body: JSON.stringify(body) };
-                        console.log(`${TAG} converted ${removed} older image tool exchange(s) to text notes, keeping only the latest one.`);
+                        console.log(`${TAG} removed ${removed} older image exchange(s), kept newest as tool call, masked ${replaced}.`);
                     }
                 }
             }
