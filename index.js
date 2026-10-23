@@ -79,9 +79,7 @@ function appendText(content, text) {
 
 /**
  * Trims image-generation tool exchanges from the prompt:
- *  - the newest successful image call stays as a real tool call (so the model keeps
- *    the tool-call format), with its result masked to a placeholder
- *  - older successful image calls are removed (tool result + tool_calls entry) and
+ *  - successful image calls are removed (tool result + tool_calls entry) and
  *    replaced by a text note "[{{char}} sent a picture that contains: {{prompt}}]"
  *  - failed image calls are removed with no note
  *  - other function calls are never touched
@@ -113,11 +111,8 @@ function stripImageToolExchanges(messages) {
     let tailStart = messages.length;
     while (tailStart > 0 && isToolRole(messages[tailStart - 1])) tailStart--;
 
-    // Newest successful image call is kept as a real example of tool calling.
-    let keepIdx = -1;
-    messages.forEach((msg, i) => {
-        if (kindOf(msg) === 'sent') keepIdx = i;
-    });
+    // No image call is kept as a tool-call example: all finished image exchanges are hidden.
+    const keepIdx = -1;
 
     const removedIds = new Set();
     const failedIds = new Set();
